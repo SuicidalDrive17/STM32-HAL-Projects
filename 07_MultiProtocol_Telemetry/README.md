@@ -1,7 +1,7 @@
 # 07 Multi-Protocol Telemetry Platform
 
 ## Overview
-This project is an advanced, real-time telemetry platform built on the STM32L476RG microcontroller. It demonstrates the seamless integration of multiple hardware protocols (I2C, SPI, UART with DMA) and edge computing (Sensor Fusion). The system calculates physical orientation data (Roll and Pitch) from raw IMU sensors and visualizes it dynamically on both a local TFT display and a PC-based Ground Station.
+This project is a real-time telemetry platform built on the STM32L476RG microcontroller. It demonstrates the seamless integration of multiple hardware protocols (I2C, SPI, UART with DMA) and edge computing (Sensor Fusion). The system calculates physical orientation data (Roll and Pitch) from raw IMU sensors and visualizes it dynamically on both a local TFT display and a PC-based Ground Station.
 
 ## System Architecture
 The repository is divided into two main components:
@@ -35,6 +35,3 @@ The repository is divided into two main components:
 *   **Sensor Fusion:** Hardware-accelerated trigonometric calculations convert raw `g` forces into human-readable angles.
 *   **Buffer Backlog Mitigation:** The Python Ground Station implements custom buffer-clearing logic to prevent rendering latency during high-speed data streams.
 
-## Dependencies & Setup
-*   **Firmware:** STM32CubeIDE (Load the project from the `Firmware` directory).
-*   **Software:** Python 3.x. Install dependencies using: `pip install pyserial matplotlib`. Update the `PORT` variable in the script to match your local COM port before running.
