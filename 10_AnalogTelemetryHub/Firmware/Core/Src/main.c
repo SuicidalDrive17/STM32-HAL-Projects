@@ -28,6 +28,11 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 typedef enum {
+	MODE_SENDING,		// Pot controls LEDs
+	MODE_RECEIVING		// UART commands control LEDs
+} GameMode_t;
+
+typedef enum {
 STATE_SAFE,		// Green led
 STATE_MID,		// Yellow led
 STATE_WARNING,	// Red led
@@ -56,7 +61,7 @@ DMA_HandleTypeDef hdma_usart2_rx;
 DMA_HandleTypeDef hdma_usart2_tx;
 
 /* USER CODE BEGIN PV */
-
+volatile GameMode_t current_mode = MODE_SENDING;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -73,6 +78,9 @@ static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN 0 */
 volatile uint16_t data_buffer[1];
 char tx_buffer[64];
+
+char rx_buffer[7];
+volatile uint8_t command_ready = 0;
 /* USER CODE END 0 */
 
 /**
@@ -120,108 +128,157 @@ int main(void)
 
   // 4. Surgically kill the DMA interrupts to prevent the CPU crash
   __HAL_DMA_DISABLE_IT(&hdma_adc1, DMA_IT_TC | DMA_IT_HT | DMA_IT_TE);
+
+  HAL_UART_Receive_DMA(&huart2, (uint8_t*)rx_buffer, sizeof(rx_buffer));
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 while (1)
 {
-	// 1. State Machine with Hysteresis (Deadband filter)
-	if (currentState == STATE_SAFE)
-	{
-	    if (data_buffer[0] > 1250) currentState = STATE_MID;
-	}
-	else if (currentState == STATE_MID)
-	{
-	    if (data_buffer[0] < 1150) currentState = STATE_SAFE;
-	    else if (data_buffer[0] > 2450) currentState = STATE_WARNING;
-	}
-	else if (currentState == STATE_WARNING)
-	{
-	    if (data_buffer[0] < 2350) currentState = STATE_MID;
-	    else if (data_buffer[0] > 3650) currentState = STATE_ALARM;
-	}
-	else if (currentState == STATE_ALARM)
-	{
-	    if (data_buffer[0] < 3550) currentState = STATE_WARNING;
-	}
+	// The mode announcer
+	static GameMode_t last_known_mode = MODE_SENDING;
 
-	// 2. Smart Value & State Tracking
-	static uint16_t last_pot_value = 0xFFFF;
-	static SystemState_t last_sent_state = (SystemState_t)99;
-
-	// FIX: Freeze the volatile memory into a snapshot for this loop iteration
-	uint16_t current_pot = data_buffer[0];
-
-	// Calculate absolute difference using the frozen snapshot
-	uint16_t value_diff = (current_pot > last_pot_value) ? (current_pot - last_pot_value) : (last_pot_value - current_pot);
-
-	// Transmit ONLY if you turned the dial more than 100 units, OR if the LED state changed
-	if (value_diff > 50 || currentState != last_sent_state)
+	if (current_mode != last_known_mode)
 	{
-		if (currentState == STATE_SAFE)
+		if (current_mode == MODE_RECEIVING)
 		{
-			snprintf(tx_buffer, sizeof(tx_buffer), "STATE SAFE | Pot:%u\r\n", current_pot);
+			static char msg[] = "\r\n--- ENTERED RECEIVING MODE ---\r\n";
+			HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
 		}
-		else if (currentState == STATE_MID)
+		else if (current_mode == MODE_SENDING)
 		{
-			snprintf(tx_buffer, sizeof(tx_buffer), "STATE MID | Pot:%u\r\n", current_pot);
+			static char msg[] = "\r\n--- ENTERED SENDING MODE ---\r\n";
+			HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
 		}
-		else if (currentState == STATE_WARNING)
-		{
-			snprintf(tx_buffer, sizeof(tx_buffer), "STATE WARNING | Pot:%u\r\n", current_pot);
-		}
-		else if (currentState == STATE_ALARM)
-		{
-			snprintf(tx_buffer, sizeof(tx_buffer), "STATE ALARM | Pot:%u\r\n", current_pot);
-		}
-
-		// Fire the DMA transmission
-		HAL_UART_Transmit_DMA(&huart2, (uint8_t*)tx_buffer, strlen(tx_buffer));
-
-		// Lock the gates using the snapshot
-		last_pot_value = current_pot;
-		last_sent_state = currentState;
 	}
 
-	switch (currentState)
+	last_known_mode = current_mode;
+
+	switch (current_mode)
 	{
-		case STATE_SAFE:
-			// Green led
-			HAL_GPIO_WritePin(GPIOC, GREEN_LED_Pin, GPIO_PIN_SET);
-			HAL_GPIO_WritePin(GPIOC, YELLOW_LED_Pin, GPIO_PIN_RESET);
-			HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_RESET);
-			break;
-
-		case STATE_MID:
-			// Yellow led
-			HAL_GPIO_WritePin(GPIOC, GREEN_LED_Pin, GPIO_PIN_RESET);
-			HAL_GPIO_WritePin(GPIOC, YELLOW_LED_Pin, GPIO_PIN_SET);
-			HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_RESET);
-			break;
-
-		case STATE_WARNING:
-			// Red led
-			HAL_GPIO_WritePin(GPIOC, GREEN_LED_Pin, GPIO_PIN_RESET);
-			HAL_GPIO_WritePin(GPIOC, YELLOW_LED_Pin, GPIO_PIN_RESET);
-			HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_SET);
-			break;
-
-		case STATE_ALARM:
-			// Blinking red led every 250 ms
-			// static keyword means it won't get erased when the loop restarts
-			static uint32_t last_toggle_time = 0;
-
-			if (HAL_GetTick() - last_toggle_time >= 250)
+		case MODE_SENDING:
+		{
+			// 1. State Machine with Hysteresis (Deadband filter)
+			if (currentState == STATE_SAFE)
 			{
-				HAL_GPIO_WritePin(GPIOC, GREEN_LED_Pin, GPIO_PIN_RESET);
-				HAL_GPIO_WritePin(GPIOC, YELLOW_LED_Pin, GPIO_PIN_RESET);
-				HAL_GPIO_TogglePin(GPIOC, RED_LED_Pin);
-
-				last_toggle_time = HAL_GetTick();
+				if (data_buffer[0] > 1250) currentState = STATE_MID;
 			}
+			else if (currentState == STATE_MID)
+			{
+				if (data_buffer[0] < 1150) currentState = STATE_SAFE;
+				else if (data_buffer[0] > 2450) currentState = STATE_WARNING;
+			}
+			else if (currentState == STATE_WARNING)
+			{
+				if (data_buffer[0] < 2350) currentState = STATE_MID;
+				else if (data_buffer[0] > 3650) currentState = STATE_ALARM;
+			}
+			else if (currentState == STATE_ALARM)
+			{
+				if (data_buffer[0] < 3550) currentState = STATE_WARNING;
+			}
+
+			// 2. Smart Value & State Tracking
+			static uint16_t last_pot_value = 0xFFFF;
+			static SystemState_t last_sent_state = (SystemState_t)99;
+
+			// FIX: Freeze the volatile memory into a snapshot for this loop iteration
+			uint16_t current_pot = data_buffer[0];
+
+			// Calculate absolute difference using the frozen snapshot
+			uint16_t value_diff = (current_pot > last_pot_value) ? (current_pot - last_pot_value) : (last_pot_value - current_pot);
+
+			// Transmit ONLY if you turned the dial more than 100 units, OR if the LED state changed
+			if (value_diff > 50 || currentState != last_sent_state)
+			{
+				if (currentState == STATE_SAFE)
+				{
+					snprintf(tx_buffer, sizeof(tx_buffer), "STATE SAFE | Pot:%u\r\n", current_pot);
+				}
+				else if (currentState == STATE_MID)
+				{
+					snprintf(tx_buffer, sizeof(tx_buffer), "STATE MID | Pot:%u\r\n", current_pot);
+				}
+				else if (currentState == STATE_WARNING)
+				{
+					snprintf(tx_buffer, sizeof(tx_buffer), "STATE WARNING | Pot:%u\r\n", current_pot);
+				}
+				else if (currentState == STATE_ALARM)
+				{
+					snprintf(tx_buffer, sizeof(tx_buffer), "STATE ALARM | Pot:%u\r\n", current_pot);
+				}
+
+				// Fire the DMA transmission
+				HAL_UART_Transmit_DMA(&huart2, (uint8_t*)tx_buffer, strlen(tx_buffer));
+
+				// Lock the gates using the snapshot
+				last_pot_value = current_pot;
+				last_sent_state = currentState;
+			}
+
+			switch (currentState)
+			{
+				case STATE_SAFE:
+					// Green led
+					HAL_GPIO_WritePin(GPIOC, GREEN_LED_Pin, GPIO_PIN_SET);
+					HAL_GPIO_WritePin(GPIOC, YELLOW_LED_Pin, GPIO_PIN_RESET);
+					HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_RESET);
+					break;
+
+				case STATE_MID:
+					// Yellow led
+					HAL_GPIO_WritePin(GPIOC, GREEN_LED_Pin, GPIO_PIN_RESET);
+					HAL_GPIO_WritePin(GPIOC, YELLOW_LED_Pin, GPIO_PIN_SET);
+					HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_RESET);
+					break;
+
+				case STATE_WARNING:
+					// Red led
+					HAL_GPIO_WritePin(GPIOC, GREEN_LED_Pin, GPIO_PIN_RESET);
+					HAL_GPIO_WritePin(GPIOC, YELLOW_LED_Pin, GPIO_PIN_RESET);
+					HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_SET);
+					break;
+
+				case STATE_ALARM:
+					// Blinking red led every 250 ms
+					// static keyword means it won't get erased when the loop restarts
+					static uint32_t last_toggle_time = 0;
+
+					if (HAL_GetTick() - last_toggle_time >= 250)
+					{
+						HAL_GPIO_WritePin(GPIOC, GREEN_LED_Pin, GPIO_PIN_RESET);
+						HAL_GPIO_WritePin(GPIOC, YELLOW_LED_Pin, GPIO_PIN_RESET);
+						HAL_GPIO_TogglePin(GPIOC, RED_LED_Pin);
+
+						last_toggle_time = HAL_GetTick();
+					}
+				break;
+			}
+		}
 			break;
-	}
+
+			case MODE_RECEIVING:
+				if (command_ready == 1)
+				{
+					// Instantly lower the flag
+					command_ready = 0;
+
+					// Parse the prefix
+					if (strncmp((char*)rx_buffer, "LCD:", 4) == 0)
+					{
+						// 3. Read specific array indices.
+						// rx_buffer[0] = 'L', [1] = 'C', [2] = 'D', [3] = ':'
+						// rx_buffer[4] = Green, [5] = Yellow, [6] = Red
+
+						HAL_GPIO_WritePin(GPIOC, GREEN_LED_Pin, (rx_buffer[4] == '1') ? GPIO_PIN_SET : GPIO_PIN_RESET);
+						HAL_GPIO_WritePin(GPIOC, YELLOW_LED_Pin, (rx_buffer[5] == '1') ? GPIO_PIN_SET : GPIO_PIN_RESET);
+						HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, (rx_buffer[6] == '1') ? GPIO_PIN_SET : GPIO_PIN_RESET);
+					}
+				}
+			break;
+		}
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -446,13 +503,58 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : BTN_Pin */
+  GPIO_InitStruct.Pin = BTN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(BTN_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	if (huart->Instance == USART2)
+	{
+		// Raise the flag so the while loop knows new data arrived
+		command_ready = 1;
 
+		// Re-arm the DMA to listen for the next 7 chars
+		HAL_UART_Receive_DMA(huart, (uint8_t*)rx_buffer, 7);
+	}
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	// Check if the interrupt came from PC9 (BTN_Pin)
+	if (GPIO_Pin == BTN_Pin)
+	{
+		static uint32_t last_button_press = 0;
+		uint32_t current_time = HAL_GetTick();
+
+		// Debounce 250ms must pass
+		if (current_time - last_button_press > 250)
+		{
+			if (current_mode == MODE_SENDING)
+			{
+				current_mode = MODE_RECEIVING;
+			}
+			else if (current_mode == MODE_RECEIVING)
+			{
+				current_mode = MODE_SENDING;
+			}
+
+			last_button_press = current_time;
+		}
+	}
+}
 /* USER CODE END 4 */
 
 /**
